@@ -24,12 +24,12 @@ def home():
 def log(message):
     print(message, flush=True)
 
-# --- 2. CREDENTIALS & CONSTANTS (HARDCODED DUMMY VALUES) ---
+# --- 2. HARDCODED CREDENTIALS & CONSTANTS ---
 GROQ_API_KEY = "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"
-SCRATCH_USER = "Pyroshape"
-SCRATCH_PASSWORD = "grandmaster@17"  # Replace this with your actual password in production
+SCRATCH_USER = "--BlazingPixels--"
+SCRATCH_SESSION_ID = ".eJxVj8luwyAURf-FdeyayUN2ddetOqiLrqwHPGISGyJDmjRV_71YyiY7dO95R9xfcoq4eJiRbElR9BNcnd-9ugtOsSjIhgxwSuOwQoMzmaGCtZVkFc2dAu8xhxamiBuSMCYdwsGtrnNYDrm7EyjQB_SrZc3QJ6chueDLWxHLdzxOt7C_wdkb8iMfCdkybuu2QqkEmLatKGdGWqtE14Bst11Qe_4xzP2n8OpJT3O_jD8Ov58vb1kzhZ3zhTtmU0NLxpqSSl7SRuQu6gWSHnEh27Sc8hazB78LQ3IzXoNfBz3OuOSvPbzgefjK4-6njRDHDJkGtWCmriVDgVZKXRngNe3QcA4WQVlsOi3J3z9M_3uL:1wkmHZ:3leSxp6FZvU0nv-pFEklw1E1jcM"
 PROJECT_ID = "1362701122"
-RENDER_APP_URL = "https://scratchyai-bot.onrender.com"
+RENDER_APP_URL = "https://scratchnpc-ai.onrender.com"
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 cloud_monitor = None
@@ -67,8 +67,9 @@ def run_scratch_bot():
     
     while True:
         try:
-            # Authenticate natively using username and password to prevent token expiration
-            session = sa.login(SCRATCH_USER, SCRATCH_PASSWORD)
+            # Rebuilt specifically using sa.Session to explicitly pair the username with the token
+            # This is critical for clearing cloud host IP bans on Scratch's network!
+            session = sa.Session(SCRATCH_SESSION_ID, username=SCRATCH_USER)
             
             # Start/Restart telemetry monitoring thread with this session
             monitor_thread = threading.Thread(target=monitor_cloud_variables, args=(session,), daemon=True)
