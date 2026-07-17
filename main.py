@@ -4,11 +4,12 @@ import multiprocessing
 import threading
 import time
 import warnings
+import re
 import requests
 from flask import Flask
 import scratchattach as sa
-# Import the native scratchattach encoding utility
 from scratchattach import Encoding
+from groq import Groq
 
 # Suppress the scratchattach credentials warning to keep logs clean
 warnings.filterwarnings('ignore', category=sa.LoginDataWarning)
@@ -23,7 +24,7 @@ def home():
 def log(message):
     print(message, flush=True)
 
-# --- 2. CREDENTIALS & CONSTANTS ---
+# --- 2. CREDENTIALS & CONSTANTS (HARDCODED DUMMY VALUES) ---
 GROQ_API_KEY = "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"
 SCRATCH_USER = "Pyroshape"
 SCRATCH_SESSION_ID = ".eJxVj8tOwzAQRf_F6zbYrvNwdiAkukCIdkHFKprYk8aktSvbVQSIf2ciddPd6J6Zo7m_7Jowejgja9n7dwxphAuyFevgmsdugZ2zxESllWzKpiLWg_dI4QCnhCuWMWUTwuQWxxziROxO0IOZ0C-WJUOfnYHsgi9uIBV7vJxu4dNtmbyBBjqSwG1pa9U0UqseuB4aY6CHAQYLmot2t09pFxU_rLeDnbfdy_j8GvX64zBPpDmFo_NrdyFTLQop60KUm0LUilgyEbIZMbI2xyt1sV_gj6HL7ow_wS-FHs8Y6bWHN5y7Typ3X22ENNJSwzmUVnIx2NrqjcBKGA2otKlVbSopBH1OOfv7B176eC0:1wkXce:FwGlqQDOV-bQNbjlX2geU5QCk2w"
@@ -91,22 +92,30 @@ def run_scratch_bot():
                         decoded_prompt = Encoding.decode(encoded_prompt)
                         log(f"[Scratch Bot] Decoded Prompt: {decoded_prompt}")
 
-                        # Query Groq
+                        # Query Groq with strict formatting instructions
                         chat_completion = groq_client.chat.completions.create(
                             messages=[
                                 {
                                     "role": "system", 
-                                    "content": "You are a friendly wizard NPC in a Scratch game. Keep your response short, max 100 characters."
+                                    "content": "You are a friendly wizard NPC in a Scratch game. "
+                                               "Keep your response short, max 100 characters. "
+                                               "CRITICAL: You must only use lowercase letters (a-z) and spaces. "
+                                               "Do not use ANY punctuation, periods, commas, apostrophes, or capital letters."
                                 },
                                 {"role": "user", "content": decoded_prompt}
                             ],
                             model="llama-3.1-8b-instant",
                         )
-                        ai_reply = chat_completion.choices[0].message.content
-                        log(f"[Scratch Bot] Groq AI Reply: {ai_reply}")
+                        raw_reply = chat_completion.choices[0].message.content
+                        log(f"[Scratch Bot] Raw Groq AI Reply: {raw_reply}")
+
+                        # Force strict filter: absolute insurance against symbols or capitals
+                        clean_reply = raw_reply.lower()
+                        clean_reply = re.sub(r'[^a-z ]', '', clean_reply)
+                        log(f"[Scratch Bot] Filtered AI Reply: {clean_reply}")
 
                         # Encode response using built-in scratchattach
-                        encoded_reply = Encoding.encode(ai_reply)
+                        encoded_reply = Encoding.encode(clean_reply)
                         
                         # Push to Scratch using our separate write pipeline
                         if cloud_monitor is not None:
