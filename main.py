@@ -1,175 +1,150 @@
 import os
-import sys
-import multiprocessing
-import threading
 import time
-import warnings
+import threading
+import requests
 from flask import Flask
 import scratchattach as sa
-from groq import Groq
 
-# Suppress the scratchattach credentials warning to keep logs clean
-warnings.filterwarnings('ignore', category=sa.LoginDataWarning)
+app = Flask(__name__)
 
-# --- 1. SET UP FLASK ---
-app = Flask('')
+# --- CONFIGURATION (Load from Environment Variables for Security) ---
+# It is highly recommended to set these in your Render Dashboard Environment Variables!
+PROJECT_ID = os.environ.get("PROJECT_ID", "YOUR_PROJECT_ID")
+USERNAME = os.environ.get("SCRATCH_USERNAME", "YourScratchUsername")
+PASSWORD = os.environ.get("SCRATCH_PASSWORD", "YourScratchPassword")
+VARIABLE_NAME = "YOUR_VARIABLE_NAME" # Do not include the cloud emoji
+RENDER_APP_URL = os.environ.get("RENDER_APP_URL", "") # e.g. "https://scratchnpc-ai.onrender.com"
 
-@app.route('/')
+# Global state to keep track of the latest data safely across threads
+shared_data = {
+    "latest_value": None,
+    "last_updated": 0,
+    "websocket_connected": False
+}
+
+# --- FLASK WEB SERVER ROUTES ---
+@app.route("/")
 def home():
-    return "NPC Brain is active and running!"
+    status = "Connected" if shared_data["websocket_connected"] else "Polling Fallback Active"
+    return {
+        "status": "NPC Brain is active and running!",
+        "scratch_connection": status,
+        "last_tracked_value": shared_data["latest_value"],
+        "last_updated_epoch": shared_data["last_updated"]
+    }
 
-def log(message):
-    print(message, flush=True)
+@app.route("/get_var")
+def get_var():
+    # An endpoint you can call to instantly see what the server has stored
+    return {
+        "variable": VARIABLE_NAME,
+        "value": shared_data["latest_value"],
+        "last_updated": shared_data["last_updated"]
+    }
 
-# --- 2. MATH-BASED ENCODER & DECODER ---
-def custom_encode(text):
-    encoded_string = ""
-    text = text.lower()
-    for char in text:
-        if 'a' <= char <= 'z':
-            position = ord(char) - ord('a') + 1
-            code = (position * 2) + 19
-            encoded_string += str(code)
-        elif char == ' ':
-            encoded_string += "10"
-        else:
-            encoded_string += "10"
-    return encoded_string
 
-def custom_decode(numeric_string):
-    decoded_string = ""
-    for i in range(0, len(numeric_string), 2):
-        pair = numeric_string[i:i+2]
-        if pair:
-            try:
-                code = int(pair)
-                if 21 <= code <= 71 and code % 2 != 0:
-                    position = (code - 19) // 2
-                    char = chr(position + ord('a') - 1)
-                    decoded_string += char
-                elif code == 10:
-                    decoded_string += " "
-                else:
-                    decoded_string += "?"
-            except ValueError:
-                pass
-    return decoded_string
-
-# --- 3. SET UP CREDENTIALS ---
-GROQ_API_KEY = "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"
-SCRATCH_USER = "Pyroshape"
-SCRATCH_SESSION_ID = ".eJxVj8tOwzAQRf_F6zbYrvNwdiAkukCIdkHFKprYk8aktSvbVQSIf2ciddPd6J6Zo7m_7Jowejgja9n7dwxphAuyFevgmsdugZ2zxESllWzKpiLWg_dI4QCnhCuWMWUTwuQWxxziROxO0IOZ0C-WJUOfnYHsgi9uIBV7vJxu4dNtmbyBBjqSwG1pa9U0UqseuB4aY6CHAQYLmot2t09pFxU_rLeDnbfdy_j8GvX64zBPpDmFo_NrdyFTLQop60KUm0LUilgyEbIZMbI2xyt1sV_gj6HL7ow_wS-FHs8Y6bWHN5y7Typ3X22ENNJSwzmUVnIx2NrqjcBKGA2otKlVbSopBH1OOfv7B176eC0:1wkXce:FwGlqQDOV-bQNbjlX2geU5QCk2w"
-PROJECT_ID = "1362701122"
-
-groq_client = Groq(api_key=GROQ_API_KEY)
-
-# We keep global references so the main listener process can talk to the monitor connection
-cloud_monitor = None
-
-# --- 4. THE LIVE STATUS BACKGROUND LOOP ---
-def monitor_cloud_variables(session):
-    global cloud_monitor
-    log("[Monitor] Live telemetry monitoring thread starting...")
-    try:
-        cloud_monitor = session.connect_cloud(PROJECT_ID)
-        log("[Monitor] Live telemetry connection established.")
-    except Exception as e:
-        log(f"[Monitor Init Error] Failed to set up monitor connection: {e}")
-        return
-
+# --- THE FOOLPROOF SCRATCH LISTENER & RECONNECTOR ---
+def start_scratch_services():
+    """
+    Main supervisor thread. It initializes the websocket listener and 
+    continually checks to ensure the connection is healthy.
+    """
+    print("[Supervisor] Initializing Scratch services...")
+    
     while True:
         try:
-            prompt_val = cloud_monitor.get_var("AI_PROMPT")
-            response_val = cloud_monitor.get_var("AI_RESPONSE")
+            # 1. Login & Establish Cloud Connection
+            session = sa.login(USERNAME, PASSWORD)
+            cloud = session.connect_scratch_cloud(PROJECT_ID)
             
-            decoded_prompt = custom_decode(prompt_val) if prompt_val else "None"
-            decoded_response = custom_decode(response_val) if response_val else "None"
+            # 2. Grab initial value via HTTP request immediately so we aren't blank on startup
+            try:
+                initial_val = sa.get_var(PROJECT_ID, VARIABLE_NAME)
+                shared_data["latest_value"] = initial_val
+                shared_data["last_updated"] = time.time()
+                print(f"[Supervisor] Successfully pulled initial value: {initial_val}")
+            except Exception as e:
+                print(f"[Warning] Direct API fetch failed on start: {e}")
+
+            # 3. Setup WebSocket event listeners
+            events = cloud.events()
+
+            @events.event
+            def on_set(activity):
+                if activity.var == VARIABLE_NAME:
+                    shared_data["latest_value"] = activity.value
+                    shared_data["last_updated"] = time.time()
+                    print(f"[WebSocket] Cloud Update Detected: {activity.value}")
+
+            @events.event
+            def on_ready():
+                shared_data["websocket_connected"] = True
+                print("[WebSocket] Connected and listening live to Scratch cloud!")
+
+            # Start event listener in a non-blocking thread
+            # ignore_exceptions=True keeps the thread alive if a single message is malformed
+            events.start(thread=True, ignore_exceptions=True)
             
-            log(f"[LIVE AND RUNNING] ☁ AI_PROMPT: {prompt_val} ('{decoded_prompt}') | ☁ AI_RESPONSE: {response_val} ('{decoded_response}')")
-        except Exception as e:
-            log(f"[Monitor Error] Telemetry update failed: {e}")
-        
-        time.sleep(5)
-
-# --- 5. THE MAIN CLOUD VARIABLE LISTENER ---
-def run_scratch_bot():
-    global cloud_monitor
-    log("=== [Scratch Bot Process] Starting Up ===")
-    try:
-        session = sa.login_by_id(SCRATCH_SESSION_ID, username=SCRATCH_USER)
-        
-        # Start our telemetry monitor in a background thread to establish `cloud_monitor`
-        monitor_thread = threading.Thread(target=monitor_cloud_variables, args=(session,), daemon=True)
-        monitor_thread.start()
-        
-        # Connection A: Strictly for listening to incoming updates
-        cloud_events = session.connect_cloud(PROJECT_ID)
-        events = cloud_events.events()
-
-        @events.event
-        def on_set(activity):
-            if activity.var == "AI_PROMPT":
-                encoded_prompt = activity.value
+            # 4. Connection Health Watchdog Loop
+            # This loops forever. If the websocket goes dead, it breaks out and triggers a reconnect.
+            missed_pings = 0
+            while True:
+                time.sleep(15) # Check health every 15 seconds
                 
-                if not encoded_prompt or encoded_prompt == "0" or encoded_prompt == "":
-                    return
-
-                log(f"[Scratch Bot] New encoded prompt received: {encoded_prompt}")
+                # Check if the connection dropped
+                if not events.running:
+                    print("[Watchdog] WebSocket has stopped running. Initiating reconnection...")
+                    shared_data["websocket_connected"] = False
+                    break
                 
+                # Double-check fallback: Force a direct variable pull every 60 seconds
+                # This guarantees that even if the WebSocket is silently dead, we still get updates.
                 try:
-                    # 1. Decode incoming message
-                    decoded_prompt = custom_decode(encoded_prompt)
-                    log(f"[Scratch Bot] Decoded Prompt: {decoded_prompt}")
-
-                    # 2. Query the AI
-                    chat_completion = groq_client.chat.completions.create(
-                        messages=[
-                            {
-                                "role": "system", 
-                                "content": "You are a friendly wizard NPC in a Scratch game. Keep your response short, max 100 characters."
-                            },
-                            {"role": "user", "content": decoded_prompt}
-                        ],
-                        model="llama-3.1-8b-instant",
-                    )
-                    ai_reply = chat_completion.choices[0].message.content
-                    log(f"[Scratch Bot] Groq AI Reply: {ai_reply}")
-
-                    # 3. Encode response using the math formula
-                    encoded_reply = custom_encode(ai_reply)
-                    
-                    # 4. Push to Scratch Cloud using the clean cloud_monitor connection!
-                    if cloud_monitor is not None:
-                        cloud_monitor.set_var("AI_RESPONSE", encoded_reply)
-                        log(f"[Scratch Bot] Updated ☁ AI_RESPONSE to: {encoded_reply}")
-                    else:
-                        log("[Scratch Bot] Write failed: cloud_monitor connection not initialized yet.")
-
+                    fresh_val = sa.get_var(PROJECT_ID, VARIABLE_NAME)
+                    if fresh_val != shared_data["latest_value"]:
+                        shared_data["latest_value"] = fresh_val
+                        shared_data["last_updated"] = time.time()
+                        print(f"[Fallback Pull] Caught missing value change: {fresh_val}")
                 except Exception as e:
-                    log(f"[Scratch Bot] Processing Error: {e}")
-                    try:
-                        if cloud_monitor is not None:
-                            cloud_monitor.set_var("AI_RESPONSE", custom_encode("error"))
-                    except Exception as cloud_err:
-                        log(f"[Scratch Bot] Failed to write error to cloud: {cloud_err}")
+                    print(f"[Watchdog] Fallback API check failed: {e}")
 
-        @events.event
-        def on_ready():
-            log("=== [Scratch Bot] Live & Monitoring ☁ AI_PROMPT ===")
+        except Exception as e:
+            print(f"[Supervisor] Connection error: {e}. Retrying in 10 seconds...")
+            shared_data["websocket_connected"] = False
+            time.sleep(10)
 
-        events.start()
 
-    except Exception as e:
-        log(f"[Scratch Bot] FAILED TO START: {e}")
+# --- ANTI-SLEEP PINGER (Keep Render Free Tier Awake) ---
+def self_ping_loop():
+    """
+    If RENDER_APP_URL is provided, this pings the server every 10 minutes
+    so Render doesn't spin down the container due to inactivity.
+    """
+    if not RENDER_APP_URL:
+        print("[Pinger] No RENDER_APP_URL provided. Self-pinging disabled.")
+        return
+        
+    print(f"[Pinger] Active. Target: {RENDER_APP_URL}")
+    while True:
+        time.sleep(600) # Ping every 10 minutes (600 seconds)
+        try:
+            response = requests.get(RENDER_APP_URL, timeout=10)
+            print(f"[Pinger] Ping sent. Status code: {response.status_code}")
+        except Exception as e:
+            print(f"[Pinger] Ping failed: {e}")
 
-# --- 6. SECURE BACKGROUND INITIALIZATION ---
-if os.environ.get("RENDERS_BOT_SPAWNED") != "true":
-    os.environ["RENDERS_BOT_SPAWNED"] = "true"
-    bot_process = multiprocessing.Process(target=run_scratch_bot)
-    bot_process.daemon = True
-    bot_process.start()
-    log("=== [Main Web] Spawned Scratch Bot Process successfully ===")
 
+# --- APPLICATION ENTRY POINT ---
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    # 1. Start the Scratch supervisor in a background daemon thread
+    scratch_thread = threading.Thread(target=start_scratch_services, daemon=True)
+    scratch_thread.start()
+    
+    # 2. Start the self-ping loop in a background daemon thread
+    ping_thread = threading.Thread(target=self_ping_loop, daemon=True)
+    ping_thread.start()
+    
+    # 3. Start Flask on the main thread
+    # Render binds to port 10000 by default
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
