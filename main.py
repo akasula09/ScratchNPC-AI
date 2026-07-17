@@ -67,11 +67,9 @@ PROJECT_ID = "1362701122"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # --- 4. THE LIVE STATUS BACKGROUND LOOP ---
-# This background thread gets its own isolated cloud connection to pull values safely.
 def monitor_cloud_variables(session):
     log("[Monitor] Live telemetry monitoring thread starting...")
     try:
-        # Create an independent connection strictly for polling variables
         cloud_monitor = session.connect_cloud(PROJECT_ID)
         log("[Monitor] Live telemetry connection established.")
     except Exception as e:
@@ -80,11 +78,9 @@ def monitor_cloud_variables(session):
 
     while True:
         try:
-            # Safely get variables without interfering with the event listener's stream
             prompt_val = cloud_monitor.get_var("AI_PROMPT")
             response_val = cloud_monitor.get_var("AI_RESPONSE")
             
-            # Decode on the fly for easy readability in Render logs
             decoded_prompt = custom_decode(prompt_val) if prompt_val else "None"
             decoded_response = custom_decode(response_val) if response_val else "None"
             
@@ -103,7 +99,7 @@ def run_scratch_bot():
         # Connection A: Handled strictly for watching event changes
         cloud_events = session.connect_cloud(PROJECT_ID)
         
-        # Start the monitor thread using Connection B (created inside the function using the session)
+        # Start the monitor thread using Connection B
         monitor_thread = threading.Thread(target=monitor_cloud_variables, args=(session,), daemon=True)
         monitor_thread.start()
         
@@ -124,7 +120,7 @@ def run_scratch_bot():
                     decoded_prompt = custom_decode(encoded_prompt)
                     log(f"[Scratch Bot] Decoded Prompt: {decoded_prompt}")
 
-                    # 2. Query the AI
+                    # 2. Query the AI with the updated Llama 3 8B model name
                     chat_completion = groq_client.chat.completions.create(
                         messages=[
                             {
@@ -133,7 +129,7 @@ def run_scratch_bot():
                             },
                             {"role": "user", "content": decoded_prompt}
                         ],
-                        model="llama3-8b-8192",
+                        model="llama-3.1-8b-instant",  # Updated from decommissioned model
                     )
                     ai_reply = chat_completion.choices[0].message.content
                     log(f"[Scratch Bot] Groq AI Reply: {ai_reply}")
