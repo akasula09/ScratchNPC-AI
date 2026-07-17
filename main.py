@@ -7,7 +7,8 @@ import warnings
 import requests
 from flask import Flask
 import scratchattach as sa
-from groq import Groq
+# Import the native scratchattach encoding utility
+from scratchattach import Encoding
 
 # Suppress the scratchattach credentials warning to keep logs clean
 warnings.filterwarnings('ignore', category=sa.LoginDataWarning)
@@ -22,41 +23,7 @@ def home():
 def log(message):
     print(message, flush=True)
 
-# --- 2. MATH-BASED ENCODER & DECODER ---
-def custom_encode(text):
-    encoded_string = ""
-    text = text.lower()
-    for char in text:
-        if 'a' <= char <= 'z':
-            position = ord(char) - ord('a') + 1
-            code = (position * 2) + 19
-            encoded_string += str(code)
-        elif char == ' ':
-            encoded_string += "10"
-        else:
-            encoded_string += "10"
-    return encoded_string
-
-def custom_decode(numeric_string):
-    decoded_string = ""
-    for i in range(0, len(numeric_string), 2):
-        pair = numeric_string[i:i+2]
-        if pair:
-            try:
-                code = int(pair)
-                if 21 <= code <= 71 and code % 2 != 0:
-                    position = (code - 19) // 2
-                    char = chr(position + ord('a') - 1)
-                    decoded_string += char
-                elif code == 10:
-                    decoded_string += " "
-                else:
-                    decoded_string += "?"
-            except ValueError:
-                pass
-    return decoded_string
-
-# --- 3. CREDENTIALS & CONSTANTS ---
+# --- 2. CREDENTIALS & CONSTANTS ---
 GROQ_API_KEY = "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"
 SCRATCH_USER = "Pyroshape"
 SCRATCH_SESSION_ID = ".eJxVj8tOwzAQRf_F6zbYrvNwdiAkukCIdkHFKprYk8aktSvbVQSIf2ciddPd6J6Zo7m_7Jowejgja9n7dwxphAuyFevgmsdugZ2zxESllWzKpiLWg_dI4QCnhCuWMWUTwuQWxxziROxO0IOZ0C-WJUOfnYHsgi9uIBV7vJxu4dNtmbyBBjqSwG1pa9U0UqseuB4aY6CHAQYLmot2t09pFxU_rLeDnbfdy_j8GvX64zBPpDmFo_NrdyFTLQop60KUm0LUilgyEbIZMbI2xyt1sV_gj6HL7ow_wS-FHs8Y6bWHN5y7Typ3X22ENNJSwzmUVnIx2NrqjcBKGA2otKlVbSopBH1OOfv7B176eC0:1wkXce:FwGlqQDOV-bQNbjlX2geU5QCk2w"
@@ -66,16 +33,13 @@ RENDER_APP_URL = "https://scratchnpc-ai.onrender.com"
 groq_client = Groq(api_key=GROQ_API_KEY)
 cloud_monitor = None
 
-# --- 4. THE LIVE STATUS BACKGROUND LOOP ---
-# Runs in its own thread to constantly check variable health, update telemetry,
-# and provide a clean connection we can write to safely.
+# --- 3. THE LIVE STATUS BACKGROUND LOOP ---
 def monitor_cloud_variables(session):
     global cloud_monitor
     log("[Monitor] Live telemetry monitoring thread starting...")
     
     while True:
         try:
-            # Create a fresh, non-blocking connection
             cloud_monitor = session.connect_cloud(PROJECT_ID)
             log("[Monitor] Live telemetry connection established.")
             
@@ -84,17 +48,18 @@ def monitor_cloud_variables(session):
                 prompt_val = cloud_monitor.get_var("AI_PROMPT")
                 response_val = cloud_monitor.get_var("AI_RESPONSE")
                 
-                decoded_prompt = custom_decode(prompt_val) if prompt_val else "None"
-                decoded_response = custom_decode(response_val) if response_val else "None"
+                # Decode values using scratchattach's built-in decoder
+                decoded_prompt = Encoding.decode(prompt_val) if prompt_val else "None"
+                decoded_response = Encoding.decode(response_val) if response_val else "None"
                 
                 log(f"[LIVE STATUS] ☁ AI_PROMPT: {prompt_val} ('{decoded_prompt}') | ☁ AI_RESPONSE: {response_val} ('{decoded_response}')")
                 time.sleep(5)
                 
         except Exception as e:
-            log(f"[Monitor Error] Telemetry update or connection failed: {e}. Reconnecting in 10s...")
+            log(f"[Monitor Error] Telemetry update failed: {e}. Reconnecting in 10s...")
             time.sleep(10)
 
-# --- 5. THE MAIN CLOUD VARIABLE LISTENER ---
+# --- 4. THE MAIN CLOUD VARIABLE LISTENER ---
 def run_scratch_bot():
     global cloud_monitor
     log("=== [Scratch Bot Process] Starting Up ===")
@@ -122,11 +87,11 @@ def run_scratch_bot():
                     log(f"[Scratch Bot] New encoded prompt received: {encoded_prompt}")
                     
                     try:
-                        # Decode incoming message
-                        decoded_prompt = custom_decode(encoded_prompt)
+                        # Decode incoming message using built-in scratchattach
+                        decoded_prompt = Encoding.decode(encoded_prompt)
                         log(f"[Scratch Bot] Decoded Prompt: {decoded_prompt}")
 
-                        # Query Groq using the correct current Llama 3.1 model
+                        # Query Groq
                         chat_completion = groq_client.chat.completions.create(
                             messages=[
                                 {
@@ -140,8 +105,8 @@ def run_scratch_bot():
                         ai_reply = chat_completion.choices[0].message.content
                         log(f"[Scratch Bot] Groq AI Reply: {ai_reply}")
 
-                        # Encode response
-                        encoded_reply = custom_encode(ai_reply)
+                        # Encode response using built-in scratchattach
+                        encoded_reply = Encoding.encode(ai_reply)
                         
                         # Push to Scratch using our separate write pipeline
                         if cloud_monitor is not None:
@@ -154,7 +119,7 @@ def run_scratch_bot():
                         log(f"[Scratch Bot] Processing Error: {e}")
                         try:
                             if cloud_monitor is not None:
-                                cloud_monitor.set_var("AI_RESPONSE", custom_encode("error"))
+                                cloud_monitor.set_var("AI_RESPONSE", Encoding.encode("error"))
                         except Exception as cloud_err:
                             log(f"[Scratch Bot] Failed to write error to cloud: {cloud_err}")
 
@@ -162,25 +127,24 @@ def run_scratch_bot():
             def on_ready():
                 log("=== [Scratch Bot] Live & Monitoring ☁ AI_PROMPT ===")
 
-            # Run event loop. If it crashes, the outer loop will catch it and restart the session.
             events.start(thread=False)
 
         except Exception as e:
             log(f"[Scratch Bot Connection Error] {e}. Restarting bot connection in 10 seconds...")
             time.sleep(10)
 
-# --- 6. ANTI-SLEEP PINGER ---
+# --- 5. ANTI-SLEEP PINGER ---
 def self_ping_loop():
     log(f"[Pinger] Active. Target: {RENDER_APP_URL}")
     while True:
-        time.sleep(600)  # Ping Render once every 10 minutes (600s)
+        time.sleep(600)  # Ping Render once every 10 minutes
         try:
             response = requests.get(RENDER_APP_URL, timeout=10)
             log(f"[Pinger] Ping sent. Status code: {response.status_code}")
         except Exception as e:
             log(f"[Pinger] Ping failed: {e}")
 
-# --- 7. SECURE BACKGROUND INITIALIZATION ---
+# --- 6. SECURE BACKGROUND INITIALIZATION ---
 if os.environ.get("RENDERS_BOT_SPAWNED") != "true":
     os.environ["RENDERS_BOT_SPAWNED"] = "true"
     
