@@ -29,8 +29,8 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 def run_scratch_bot():
     log("=== [Scratch Bot Process] Starting Up ===")
     try:
-        # Logs in directly using your Session ID to bypass Cloudflare bans
-        session = sa.Session(SCRATCH_SESSION_ID, username=SCRATCH_USER)
+        # Modern scratchattach syntax for logging in via Session Cookie:
+        session = sa.login_by_id(SCRATCH_SESSION_ID, username=SCRATCH_USER)
         cloud = session.connect_cloud(PROJECT_ID)
         events = cloud.events()
 
