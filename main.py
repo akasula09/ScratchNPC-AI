@@ -22,9 +22,6 @@ def log(message):
     print(message, flush=True)
 
 # --- 2. MATH-BASED ENCODER & DECODER ---
-# Formula: Code = (Letter_Position * 2) + 19
-# Space maps to '10'. Unrecognized characters default to '10'.
-
 def custom_encode(text):
     encoded_string = ""
     text = text.lower()
@@ -66,8 +63,12 @@ PROJECT_ID = "1362701122"
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
+# We keep global references so the main listener process can talk to the monitor connection
+cloud_monitor = None
+
 # --- 4. THE LIVE STATUS BACKGROUND LOOP ---
 def monitor_cloud_variables(session):
+    global cloud_monitor
     log("[Monitor] Live telemetry monitoring thread starting...")
     try:
         cloud_monitor = session.connect_cloud(PROJECT_ID)
@@ -92,17 +93,17 @@ def monitor_cloud_variables(session):
 
 # --- 5. THE MAIN CLOUD VARIABLE LISTENER ---
 def run_scratch_bot():
+    global cloud_monitor
     log("=== [Scratch Bot Process] Starting Up ===")
     try:
         session = sa.login_by_id(SCRATCH_SESSION_ID, username=SCRATCH_USER)
         
-        # Connection A: Handled strictly for watching event changes
-        cloud_events = session.connect_cloud(PROJECT_ID)
-        
-        # Start the monitor thread using Connection B
+        # Start our telemetry monitor in a background thread to establish `cloud_monitor`
         monitor_thread = threading.Thread(target=monitor_cloud_variables, args=(session,), daemon=True)
         monitor_thread.start()
         
+        # Connection A: Strictly for listening to incoming updates
+        cloud_events = session.connect_cloud(PROJECT_ID)
         events = cloud_events.events()
 
         @events.event
@@ -110,7 +111,7 @@ def run_scratch_bot():
             if activity.var == "AI_PROMPT":
                 encoded_prompt = activity.value
                 
-                if not encoded_prompt or encoded_prompt == "0":
+                if not encoded_prompt or encoded_prompt == "0" or encoded_prompt == "":
                     return
 
                 log(f"[Scratch Bot] New encoded prompt received: {encoded_prompt}")
@@ -120,7 +121,7 @@ def run_scratch_bot():
                     decoded_prompt = custom_decode(encoded_prompt)
                     log(f"[Scratch Bot] Decoded Prompt: {decoded_prompt}")
 
-                    # 2. Query the AI with the updated Llama 3 8B model name
+                    # 2. Query the AI
                     chat_completion = groq_client.chat.completions.create(
                         messages=[
                             {
@@ -129,7 +130,7 @@ def run_scratch_bot():
                             },
                             {"role": "user", "content": decoded_prompt}
                         ],
-                        model="llama-3.1-8b-instant",  # Updated from decommissioned model
+                        model="llama-3.1-8b-instant",
                     )
                     ai_reply = chat_completion.choices[0].message.content
                     log(f"[Scratch Bot] Groq AI Reply: {ai_reply}")
@@ -137,14 +138,18 @@ def run_scratch_bot():
                     # 3. Encode response using the math formula
                     encoded_reply = custom_encode(ai_reply)
                     
-                    # 4. Push to Scratch Cloud
-                    cloud_events.set_var("AI_RESPONSE", encoded_reply)
-                    log(f"[Scratch Bot] Updated ☁ AI_RESPONSE to: {encoded_reply}")
+                    # 4. Push to Scratch Cloud using the clean cloud_monitor connection!
+                    if cloud_monitor is not None:
+                        cloud_monitor.set_var("AI_RESPONSE", encoded_reply)
+                        log(f"[Scratch Bot] Updated ☁ AI_RESPONSE to: {encoded_reply}")
+                    else:
+                        log("[Scratch Bot] Write failed: cloud_monitor connection not initialized yet.")
 
                 except Exception as e:
                     log(f"[Scratch Bot] Processing Error: {e}")
                     try:
-                        cloud_events.set_var("AI_RESPONSE", custom_encode("error"))
+                        if cloud_monitor is not None:
+                            cloud_monitor.set_var("AI_RESPONSE", custom_encode("error"))
                     except Exception as cloud_err:
                         log(f"[Scratch Bot] Failed to write error to cloud: {cloud_err}")
 
