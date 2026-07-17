@@ -3,9 +3,13 @@ import sys
 import multiprocessing
 import threading
 import time
+import warnings
 from flask import Flask
 import scratchattach as sa
 from groq import Groq
+
+# Suppress the scratchattach credentials warning to keep logs clean
+warnings.filterwarnings('ignore', category=sa.LoginDataWarning)
 
 # --- 1. SET UP FLASK ---
 app = Flask('')
@@ -63,19 +67,28 @@ PROJECT_ID = "1362701122"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # --- 4. THE LIVE STATUS BACKGROUND LOOP ---
-def monitor_cloud_variables(cloud_connection):
-    log("[Monitor] Live telemetry monitoring thread started.")
+# This background thread gets its own isolated cloud connection to pull values safely.
+def monitor_cloud_variables(session):
+    log("[Monitor] Live telemetry monitoring thread starting...")
+    try:
+        # Create an independent connection strictly for polling variables
+        cloud_monitor = session.connect_cloud(PROJECT_ID)
+        log("[Monitor] Live telemetry connection established.")
+    except Exception as e:
+        log(f"[Monitor Init Error] Failed to set up monitor connection: {e}")
+        return
+
     while True:
         try:
-            # Grab the current states directly from Scratch's memory
-            prompt_val = cloud_connection.get_var("AI_PROMPT")
-            response_val = cloud_connection.get_var("AI_RESPONSE")
+            # Safely get variables without interfering with the event listener's stream
+            prompt_val = cloud_monitor.get_var("AI_PROMPT")
+            response_val = cloud_monitor.get_var("AI_RESPONSE")
             
-            # Decode them on the fly for your logs to see exactly what they mean
+            # Decode on the fly for easy readability in Render logs
             decoded_prompt = custom_decode(prompt_val) if prompt_val else "None"
             decoded_response = custom_decode(response_val) if response_val else "None"
             
-            log(f"[LIVE AND RUNNING] ☁ AI_PROMPT: {prompt_val} (Decoded: '{decoded_prompt}') | ☁ AI_RESPONSE: {response_val} (Decoded: '{decoded_response}')")
+            log(f"[LIVE AND RUNNING] ☁ AI_PROMPT: {prompt_val} ('{decoded_prompt}') | ☁ AI_RESPONSE: {response_val} ('{decoded_response}')")
         except Exception as e:
             log(f"[Monitor Error] Telemetry update failed: {e}")
         
@@ -86,13 +99,15 @@ def run_scratch_bot():
     log("=== [Scratch Bot Process] Starting Up ===")
     try:
         session = sa.login_by_id(SCRATCH_SESSION_ID, username=SCRATCH_USER)
-        cloud = session.connect_cloud(PROJECT_ID)
         
-        # Start our telemetry monitor in a background thread
-        monitor_thread = threading.Thread(target=monitor_cloud_variables, args=(cloud,), daemon=True)
+        # Connection A: Handled strictly for watching event changes
+        cloud_events = session.connect_cloud(PROJECT_ID)
+        
+        # Start the monitor thread using Connection B (created inside the function using the session)
+        monitor_thread = threading.Thread(target=monitor_cloud_variables, args=(session,), daemon=True)
         monitor_thread.start()
         
-        events = cloud.events()
+        events = cloud_events.events()
 
         @events.event
         def on_set(activity):
@@ -127,13 +142,13 @@ def run_scratch_bot():
                     encoded_reply = custom_encode(ai_reply)
                     
                     # 4. Push to Scratch Cloud
-                    cloud.set_var("AI_RESPONSE", encoded_reply)
+                    cloud_events.set_var("AI_RESPONSE", encoded_reply)
                     log(f"[Scratch Bot] Updated ☁ AI_RESPONSE to: {encoded_reply}")
 
                 except Exception as e:
                     log(f"[Scratch Bot] Processing Error: {e}")
                     try:
-                        cloud.set_var("AI_RESPONSE", custom_encode("error"))
+                        cloud_events.set_var("AI_RESPONSE", custom_encode("error"))
                     except Exception as cloud_err:
                         log(f"[Scratch Bot] Failed to write error to cloud: {cloud_err}")
 
